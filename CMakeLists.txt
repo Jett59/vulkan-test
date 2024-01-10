@@ -5,8 +5,19 @@ project(vulkan-test CXX)
 set(CMAKE_CXX_STANDARD 20)
 
 find_package( Vulkan REQUIRED )
-find_package( glfw3 REQUIRED )
-find_package( glm REQUIRED )
+find_package( glfw3)
+find_package( glm )
+
+IF(NOT glfw3_FOUND)
+    set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)  
+    set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)  
+    set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)  
+    add_subdirectory(third-party/glfw)
+ENDIF()
+
+IF(NOT glfw3_FOUND)
+    add_subdirectory(third-party/glm)
+ENDIF()
 
 find_program(glslc_executable NAMES glslc)
 
