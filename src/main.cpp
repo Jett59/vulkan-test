@@ -2,6 +2,7 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
+#include <chrono>
 #include <fstream>
 #include <glm/glm.hpp>
 #include <iostream>
@@ -34,6 +35,13 @@ std::vector<uint8_t> readFile(const char* path) {
   file.read(reinterpret_cast<char*>(buffer.data()), fileSize);
 
   return buffer;
+}
+
+static inline void checkVkResult(vk::Result result,
+                                 const char* failureMessage) {
+  if (result != vk::Result::eSuccess) {
+    throw std::runtime_error(failureMessage);
+  }
 }
 
 std::vector<const char*> getValidationLayers() {
@@ -265,7 +273,6 @@ vk::SwapchainKHR createSwapChain(const vk::Device& device,
                                  const vk::SurfaceKHR& surface,
                                  const SwapChainCapabilities& capabilities,
                                  const RequiredQueueFamilyIndices& queueIndices,
-                                 const Queues& queues,
                                  const vk::Extent2D& extent) {
   uint32_t imageCount = capabilities.capabilities.minImageCount + 1;
   if (capabilities.capabilities.maxImageCount > 0 &&
@@ -392,7 +399,6 @@ vk::PipelineLayout createPipelineLayout(const vk::Device& device) {
 }
 
 vk::Pipeline createGraphicsPipeline(const vk::Device& device,
-                                    const vk::Extent2D& swapChainExtent,
                                     const vk::RenderPass& renderPass,
                                     const vk::PipelineLayout& pipelineLayout) {
   auto vertShaderCode = readFile("shaders/shader.vert.spv");
@@ -512,8 +518,7 @@ std::vector<vk::Framebuffer> createFrameBuffers(
   return swapChainFramebuffers;
 }
 
-void recordRenderCommands(const vk::Device& device,
-                          const vk::Extent2D& swapChainExtent,
+void recordRenderCommands(const vk::Extent2D& swapChainExtent,
                           const vk::RenderPass& renderPass,
                           const vk::Pipeline& graphicsPipeline,
                           const vk::Framebuffer& framebuffer,
@@ -570,14 +575,18 @@ void draw(const vk::Device& device,
           const vk::Queue& presentQueue,
           const vk::Pipeline& graphicsPipeline,
           const vk::CommandBuffer& graphicsCommandBuffer) {
-  device.waitForFences(inFlight, VK_TRUE, std::numeric_limits<uint64_t>::max());
+  checkVkResult(device.waitForFences(inFlight, VK_TRUE,
+                                     std::numeric_limits<uint64_t>::max()),
+                "Failed to wait for inFlight fence");
 
   uint32_t imageIndex;
-  device.acquireNextImageKHR(swapChain, std::numeric_limits<uint64_t>::max(),
-                             acquireImage, nullptr, &imageIndex);
+  checkVkResult(device.acquireNextImageKHR(swapChain,
+                                           std::numeric_limits<uint64_t>::max(),
+                                           acquireImage, nullptr, &imageIndex),
+                "Failed to acquire next image");
 
   graphicsCommandBuffer.reset({});
-  recordRenderCommands(device, swapChainExtent, renderPass, graphicsPipeline,
+  recordRenderCommands(swapChainExtent, renderPass, graphicsPipeline,
                        swapChainFramebuffers[imageIndex],
                        graphicsCommandBuffer);
 
@@ -603,8 +612,10 @@ void draw(const vk::Device& device,
       .pSwapchains = &swapChain,
       .pImageIndices = &imageIndex,
   };
-  presentQueue.presentKHR(presentInfo);
+  (void)presentQueue.presentKHR(presentInfo);  // TODO: Handle errors
 }
+
+static const unsigned maxInFlightFrames = 2;
 
 int main() {
   if (glfwInit() != GLFW_TRUE) {
@@ -625,7 +636,7 @@ int main() {
     auto capabilities = SwapChainCapabilities(physicalDevice, surface);
     auto swapChainExtent = capabilities.chooseExtent(window);
     auto swapChain = createSwapChain(logicalDevice, surface, capabilities,
-                                     queueIndices, queues, swapChainExtent);
+                                     queueIndices, swapChainExtent);
     auto swapChainImages = logicalDevice.getSwapchainImagesKHR(swapChain);
     auto swapChainImageViews = createSwapChainImageViews(
         logicalDevice, swapChainImages, capabilities.chooseFormat().format);
@@ -634,8 +645,7 @@ int main() {
         createRenderPass(logicalDevice, capabilities.chooseFormat());
     auto pipelineLayout = createPipelineLayout(logicalDevice);
     auto graphicsPipeline =
-        createGraphicsPipeline(logicalDevice, capabilities.chooseExtent(window),
-                               renderPass, pipelineLayout);
+        createGraphicsPipeline(logicalDevice, renderPass, pipelineLayout);
 
     auto swapChainFramebuffers = createFrameBuffers(
         logicalDevice, swapChainExtent, swapChainImageViews, renderPass);
@@ -643,30 +653,46 @@ int main() {
     auto drawCommandPool = logicalDevice.createCommandPool(
         {.flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
          .queueFamilyIndex = *queueIndices.graphicsFamily});
-    auto drawCommandBuffer = logicalDevice.allocateCommandBuffers(
-        {.commandPool = drawCommandPool,
-         .level = vk::CommandBufferLevel::ePrimary,
-         .commandBufferCount = 1})[0];
+    std::vector<vk::CommandBuffer> drawCommandBuffers;
 
-    auto acquireImageSemaphore = logicalDevice.createSemaphore({});
-    auto renderFinishedSemaphore = logicalDevice.createSemaphore({});
-    auto inFlightFence = logicalDevice.createFence(
-        {.flags = vk::FenceCreateFlagBits::eSignaled});
+    std::vector<vk::Semaphore> acquireImageSemaphores;
+    std::vector<vk::Semaphore> renderFinishedSemaphores;
+    std::vector<vk::Fence> inFlightFences;
+
+    for (unsigned i = 0; i < maxInFlightFrames; i++) {
+      drawCommandBuffers.push_back(logicalDevice.allocateCommandBuffers(
+          {.commandPool = drawCommandPool,
+           .level = vk::CommandBufferLevel::ePrimary,
+           .commandBufferCount = 1})[0]);
+
+      acquireImageSemaphores.push_back(logicalDevice.createSemaphore({}));
+      renderFinishedSemaphores.push_back(logicalDevice.createSemaphore({}));
+      inFlightFences.push_back(logicalDevice.createFence(
+          {.flags = vk::FenceCreateFlagBits::eSignaled}));
+    }
+
+    unsigned currentInFlightFrameIndex = 0;
 
     while (!glfwWindowShouldClose(window)) {
       glfwPollEvents();
       draw(logicalDevice, swapChain, swapChainExtent, swapChainFramebuffers,
-           acquireImageSemaphore, renderFinishedSemaphore, inFlightFence,
-           renderPass, queues.graphicsQueue, queues.presentQueue,
-           graphicsPipeline, drawCommandBuffer);
+           acquireImageSemaphores[currentInFlightFrameIndex],
+           renderFinishedSemaphores[currentInFlightFrameIndex],
+           inFlightFences[currentInFlightFrameIndex], renderPass,
+           queues.graphicsQueue, queues.presentQueue, graphicsPipeline,
+           drawCommandBuffers[currentInFlightFrameIndex]);
+
+      currentInFlightFrameIndex =
+          (currentInFlightFrameIndex + 1) % maxInFlightFrames;
     }
 
     logicalDevice.waitIdle();
 
-    logicalDevice.destroyFence(inFlightFence);
-    logicalDevice.destroySemaphore(renderFinishedSemaphore);
-    logicalDevice.destroySemaphore(acquireImageSemaphore);
-
+    for (unsigned i = 0; i < maxInFlightFrames; i++) {
+      logicalDevice.destroyFence(inFlightFences[i]);
+      logicalDevice.destroySemaphore(renderFinishedSemaphores[i]);
+      logicalDevice.destroySemaphore(acquireImageSemaphores[i]);
+    }
     logicalDevice.destroyCommandPool(drawCommandPool);
 
     for (const auto& framebuffer : swapChainFramebuffers) {

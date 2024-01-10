@@ -39,3 +39,9 @@ add_custom_target(shaders ALL DEPENDS ${SHADER_BINARIES})
 
 add_executable(vulkan-test src/main.cpp)
 target_link_libraries( vulkan-test PRIVATE Vulkan::Vulkan glfw glm::glm )
+
+if(MSVC)
+  target_compile_options(vulkan-test PRIVATE /W4 /WX)
+else()
+  target_compile_options(vulkan-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
