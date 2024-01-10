@@ -12,7 +12,17 @@
 #include <vulkan/vulkan.hpp>
 
 std::vector<uint8_t> readFile(const char* path) {
-  std::ifstream file(path, std::ios::ate | std::ios::binary);
+  std::ifstream file;
+  // Since there are actually a few places where we might run the executable
+  // from (e.g. from the build directory, or from the root directory), we have
+  // to try those places too.
+  static const char* prefixes[] = {"", "../", "build/"};
+  for (const char* prefix : prefixes) {
+    file.open(std::string(prefix) + path, std::ios::ate | std::ios::binary);
+    if (file.is_open()) {
+      break;
+    }
+  }
   if (!file.is_open()) {
     throw std::runtime_error("Failed to open file");
   }
