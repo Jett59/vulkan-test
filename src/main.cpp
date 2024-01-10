@@ -563,18 +563,23 @@ void recordRenderCommands(const vk::Extent2D& swapChainExtent,
   commandBuffer.end();
 }
 
-void draw(const vk::Device& device,
-          const vk::SwapchainKHR& swapChain,
-          const vk::Extent2D& swapChainExtent,
-          const std::vector<vk::Framebuffer>& swapChainFramebuffers,
-          const vk::Semaphore& acquireImage,
-          const vk::Semaphore& renderFinished,
-          const vk::Fence& inFlight,
-          const vk::RenderPass& renderPass,
-          const vk::Queue& graphicsQueue,
-          const vk::Queue& presentQueue,
-          const vk::Pipeline& graphicsPipeline,
-          const vk::CommandBuffer& graphicsCommandBuffer) {
+enum class [[nodiscard]] DrawResult {
+  Success,
+  OutOfDate,
+};
+
+DrawResult draw(const vk::Device& device,
+                const vk::SwapchainKHR& swapChain,
+                const vk::Extent2D& swapChainExtent,
+                const std::vector<vk::Framebuffer>& swapChainFramebuffers,
+                const vk::Semaphore& acquireImage,
+                const vk::Semaphore& renderFinished,
+                const vk::Fence& inFlight,
+                const vk::RenderPass& renderPass,
+                const vk::Queue& graphicsQueue,
+                const vk::Queue& presentQueue,
+                const vk::Pipeline& graphicsPipeline,
+                const vk::CommandBuffer& graphicsCommandBuffer) {
   checkVkResult(device.waitForFences(inFlight, VK_TRUE,
                                      std::numeric_limits<uint64_t>::max()),
                 "Failed to wait for inFlight fence");
@@ -612,7 +617,26 @@ void draw(const vk::Device& device,
       .pSwapchains = &swapChain,
       .pImageIndices = &imageIndex,
   };
-  (void)presentQueue.presentKHR(presentInfo);  // TODO: Handle errors
+  try {
+    (void)presentQueue.presentKHR(presentInfo);
+    return DrawResult::Success;
+  } catch (const vk::OutOfDateKHRError&) {
+    return DrawResult::OutOfDate;
+  }
+}
+
+void cleanupSwapChain(
+    const vk::Device& device,
+    const vk::SwapchainKHR& swapChain,
+    const std::vector<vk::ImageView>& swapChainImageViews,
+    const std::vector<vk::Framebuffer>& swapChainFramebuffers) {
+  for (const auto& framebuffer : swapChainFramebuffers) {
+    device.destroyFramebuffer(framebuffer);
+  }
+  for (const auto& imageView : swapChainImageViews) {
+    device.destroyImageView(imageView);
+  }
+  device.destroySwapchainKHR(swapChain);
 }
 
 static const unsigned maxInFlightFrames = 2;
@@ -675,12 +699,37 @@ int main() {
 
     while (!glfwWindowShouldClose(window)) {
       glfwPollEvents();
-      draw(logicalDevice, swapChain, swapChainExtent, swapChainFramebuffers,
-           acquireImageSemaphores[currentInFlightFrameIndex],
-           renderFinishedSemaphores[currentInFlightFrameIndex],
-           inFlightFences[currentInFlightFrameIndex], renderPass,
-           queues.graphicsQueue, queues.presentQueue, graphicsPipeline,
-           drawCommandBuffers[currentInFlightFrameIndex]);
+      switch (draw(logicalDevice, swapChain, swapChainExtent,
+                   swapChainFramebuffers,
+                   acquireImageSemaphores[currentInFlightFrameIndex],
+                   renderFinishedSemaphores[currentInFlightFrameIndex],
+                   inFlightFences[currentInFlightFrameIndex], renderPass,
+                   queues.graphicsQueue, queues.presentQueue, graphicsPipeline,
+                   drawCommandBuffers[currentInFlightFrameIndex])) {
+        case DrawResult::OutOfDate: {
+          logicalDevice.waitIdle();
+          cleanupSwapChain(logicalDevice, swapChain, swapChainImageViews,
+                           swapChainFramebuffers);
+          // If the window is minized, we should wait until it
+          // is restored.
+          while (glfwGetWindowAttrib(window, GLFW_ICONIFIED) ||
+                 glfwGetWindowAttrib(window, GLFW_VISIBLE) == GLFW_FALSE) {
+            glfwWaitEvents();
+          }
+          swapChain = createSwapChain(logicalDevice, surface, capabilities,
+                                      queueIndices, swapChainExtent);
+          swapChainImages = logicalDevice.getSwapchainImagesKHR(swapChain);
+          swapChainImageViews =
+              createSwapChainImageViews(logicalDevice, swapChainImages,
+                                        capabilities.chooseFormat().format);
+          swapChainFramebuffers = createFrameBuffers(
+              logicalDevice, swapChainExtent, swapChainImageViews, renderPass);
+          break;
+        }
+        case DrawResult::Success: {
+          break;
+        }
+      }
 
       currentInFlightFrameIndex =
           (currentInFlightFrameIndex + 1) % maxInFlightFrames;
@@ -695,16 +744,11 @@ int main() {
     }
     logicalDevice.destroyCommandPool(drawCommandPool);
 
-    for (const auto& framebuffer : swapChainFramebuffers) {
-      logicalDevice.destroyFramebuffer(framebuffer); /*  */
-    }
+    cleanupSwapChain(logicalDevice, swapChain, swapChainImageViews,
+                     swapChainFramebuffers);
     logicalDevice.destroyPipeline(graphicsPipeline);
     logicalDevice.destroyPipelineLayout(pipelineLayout);
     logicalDevice.destroyRenderPass(renderPass);
-    for (const auto& imageView : swapChainImageViews) {
-      logicalDevice.destroyImageView(imageView);
-    }
-    logicalDevice.destroySwapchainKHR(swapChain);
     logicalDevice.destroy();
     vulkanInstance.destroySurfaceKHR(surface);
     vulkanInstance.destroy();
